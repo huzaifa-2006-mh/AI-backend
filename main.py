@@ -1,3 +1,7 @@
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -5,11 +9,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import base64
 import json
-import os
 from datetime import datetime
 from dotenv import load_dotenv
 from deepface import DeepFace
-from sqlalchemy import create_all_metadata, create_engine, Column, Integer, String, DateTime, Float
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -215,7 +218,7 @@ async def catch_all(request, exc):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=5000)
 
 
 
