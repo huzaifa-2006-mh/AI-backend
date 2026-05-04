@@ -18,10 +18,12 @@ from fastapi.responses import FileResponse
 from pathlib import Path
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 load_dotenv()
 
 app = FastAPI()
+executor = ThreadPoolExecutor(max_workers=4)
 
 # Database Setup
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -57,13 +59,13 @@ hands = mp_hands.Hands(
 
 @app.get("/api")
 async def root():
-    return {"message": "MHS AI Backend Running"}
+    return {"message": "MHS AI Engine Online"}
 
 @app.get("/api/logs")
 async def get_logs():
     try:
         db = SessionLocal()
-        logs = db.query(AILog).order_by(AILog.timestamp.desc()).limit(50).all()
+        logs = db.query(AILog).order_by(AILog.timestamp.desc()).limit(30).all()
         db.close()
         return [
             {
@@ -75,165 +77,145 @@ async def get_logs():
             } for log in logs
         ]
     except Exception as e:
-        print(f"Database Error: {e}")
+        print(f"DB Error: {e}")
         return []
+
+async def process_air_writing(frame, hands_model, canvas, points):
+    h, w, _ = frame.shape
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+    # Run Mediapipe in a separate thread to keep event loop free
+    results = await asyncio.to_thread(hands_model.process, rgb_frame)
+    
+    fingertip = None
+    if results.multi_hand_landmarks:
+        for hand_lms in results.multi_hand_landmarks:
+            lm8 = hand_lms.landmark[8] # Index Tip
+            lm6 = hand_lms.landmark[6] # Index PIP
+            lm5 = hand_lms.landmark[5] # Index MCP
+            
+            cx, cy = int(lm8.x * w), int(lm8.y * h)
+            fingertip = (cx, cy)
+            
+            # Smart gesture: Tip must be above PIP and MCP (index extended)
+            # and other fingers should ideally be folded (simplified here)
+            if lm8.y < lm6.y and lm8.y < lm5.y:
+                points.append(fingertip)
+            else:
+                points.append(None)
+
+    # Drawing logic on canvas
+    for i in range(1, len(points)):
+        if points[i-1] is not None and points[i] is not None:
+            # Draw with a slight glow effect
+            cv2.line(canvas, points[i-1], points[i], (0, 255, 255), 7)
+    
+    return cv2.addWeighted(frame, 0.7, canvas, 0.3, 0), fingertip
 
 @app.websocket("/api/ws/air-writing")
 async def air_writing_websocket(websocket: WebSocket):
     await websocket.accept()
     canvas = None
     points = []
-    processing_lock = asyncio.Lock()
+    lock = asyncio.Lock()
     
     try:
         while True:
             data = await websocket.receive_text()
+            if lock.locked(): continue
             
-            # If we are already processing a frame, skip this one to avoid lag
-            if processing_lock.locked():
-                continue
-                
-            async with processing_lock:
-                message = json.loads(data)
-                
-                if message['type'] == 'reset':
+            async with lock:
+                msg = json.loads(data)
+                if msg['type'] == 'reset':
                     canvas = None
                     points = []
                     await websocket.send_text(json.dumps({"status": "reset"}))
                     continue
-                    
-                img_data = base64.b64decode(message['image'].split(',')[1])
-                nparr = np.frombuffer(img_data, np.uint8)
-                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                frame = cv2.flip(frame, 1)
-                h, w, c = frame.shape
+                
+                img_bytes = base64.b64decode(msg['image'].split(',')[1])
+                frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+                frame = cv2.flip(frame, 1) # Mirror for user
                 
                 if canvas is None:
-                    canvas = np.zeros((h, w, 3), np.uint8)
+                    canvas = np.zeros_like(frame)
 
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = hands.process(rgb_frame)
+                combined, tip = await process_air_writing(frame, hands, canvas, points)
                 
-                fingertip = None
-                if results.multi_hand_landmarks:
-                    for hand_lms in results.multi_hand_landmarks:
-                        # Index fingertip (8) and index PIP joint (6)
-                        lm8 = hand_lms.landmark[8]
-                        lm6 = hand_lms.landmark[6]
-                        lm0 = hand_lms.landmark[0] # Wrist
-                        
-                        cx, cy = int(lm8.x * w), int(lm8.y * h)
-                        fingertip = (cx, cy)
-                        
-                        # Robust Gesture: Index finger is extended if tip is higher than PIP
-                        # AND tip is significantly higher than wrist (relative to hand size)
-                        if lm8.y < lm6.y and (lm0.y - lm8.y) > 0.1:
-                            points.append(fingertip)
-                        else:
-                            points.append(None)
-
-                # Draw smooth lines
-                for i in range(1, len(points)):
-                    if points[i-1] is not None and points[i] is not None:
-                        cv2.line(canvas, points[i-1], points[i], (0, 255, 255), 6)
-                
-                combined = cv2.addWeighted(frame, 0.7, canvas, 0.3, 0)
-                _, buffer = cv2.imencode('.jpg', combined)
-                encoded_image = base64.b64encode(buffer).decode('utf-8')
+                _, buffer = cv2.imencode('.jpg', combined, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                encoded = base64.b64encode(buffer).decode('utf-8')
                 
                 await websocket.send_text(json.dumps({
-                    "image": f"data:image/jpeg;base64,{encoded_image}",
-                    "fingertip": fingertip
+                    "image": f"data:image/jpeg;base64,{encoded}",
+                    "fingertip": tip
                 }))
-            
-    except WebSocketDisconnect:
-        print("Air Writing client disconnected")
+                
     except Exception as e:
-        print(f"Air Writing Error: {e}")
+        print(f"Air Writing WS Closed: {e}")
 
 @app.websocket("/api/ws/age-detection")
 async def age_detection_websocket(websocket: WebSocket):
     await websocket.accept()
-    last_logged_age = None
-    processing_lock = asyncio.Lock()
+    last_age = None
+    lock = asyncio.Lock()
     
     try:
         while True:
             data = await websocket.receive_text()
+            if lock.locked(): continue
             
-            if processing_lock.locked():
-                continue
-                
-            async with processing_lock:
-                message = json.loads(data)
-                img_data = base64.b64decode(message['image'].split(',')[1])
-                nparr = np.frombuffer(img_data, np.uint8)
-                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            async with lock:
+                msg = json.loads(data)
+                img_bytes = base64.b64decode(msg['image'].split(',')[1])
+                frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
                 
                 try:
-                    # Run DeepFace analysis (heavy task)
-                    results = DeepFace.analyze(frame, actions=['age'], enforce_detection=False)
+                    # OFF-LOAD HEAVY AI TO THREAD
+                    results = await asyncio.to_thread(DeepFace.analyze, frame, actions=['age'], enforce_detection=False)
                     if results:
                         res = results[0]
                         age = res['dominant_age']
-                        # Use face detection confidence if available, or default
-                        conf = res.get('face_confidence', 0.9)
+                        conf = res.get('face_confidence', 0.95)
                         
                         is_new = False
-                        if age != last_logged_age:
-                            try:
+                        if age != last_age:
+                            # ASYNC DB SAVE
+                            def save_log():
                                 db = SessionLocal()
-                                new_log = AILog(feature_type='age', result_value=str(age), confidence=float(conf))
-                                db.add(new_log)
+                                log = AILog(feature_type='age', result_value=str(age), confidence=float(conf))
+                                db.add(log)
                                 db.commit()
                                 db.close()
-                                last_logged_age = age
-                                is_new = True
-                            except Exception as db_err:
-                                print(f"Logging Error: {db_err}")
+                            
+                            await asyncio.to_thread(save_log)
+                            last_age = age
+                            is_new = True
 
                         await websocket.send_text(json.dumps({
                             "age": age,
                             "confidence": conf,
                             "new_log": is_new
                         }))
-                except Exception as e:
-                    print(f"DeepFace Analysis Error: {e}")
-                    await websocket.send_text(json.dumps({"error": "Model busy"}))
-                
-    except WebSocketDisconnect:
-        print("Age Detection client disconnected")
+                except Exception as ai_e:
+                    print(f"AI Error: {ai_e}")
+                    
     except Exception as e:
-        print(f"Age Detection WS Error: {e}")
+        print(f"Age WS Closed: {e}")
 
-# Serve Frontend Static Files with robust path checking
+# Static File Serving
 current_dir = Path(__file__).parent
-possible_paths = [
-    current_dir.parent / "frontend" / "dist", # Local structure
-    current_dir / "frontend" / "dist",        # Flat structure
-    current_dir / "dist"                       # Build in same folder
-]
-
-frontend_path = None
-for p in possible_paths:
-    if p.exists() and (p / "index.html").exists():
-        frontend_path = p
-        break
-
-if frontend_path:
-    print(f"Serving frontend from: {frontend_path}")
-    app.mount("/", StaticFiles(directory=str(frontend_path), html=True), name="frontend")
-else:
-    print("Warning: Frontend dist folder not found. API only mode.")
+dist_path = current_dir.parent / "frontend" / "dist"
+if dist_path.exists():
+    app.mount("/", StaticFiles(directory=str(dist_path), html=True), name="frontend")
 
 @app.exception_handler(404)
-async def not_found_handler(request, exc):
-    if frontend_path:
-        return FileResponse(frontend_path / "index.html")
-    return JSONResponse(status_code=404, content={"message": "Not Found"})
+async def catch_all(request, exc):
+    if dist_path.exists():
+        return FileResponse(dist_path / "index.html")
+    return JSONResponse({"error": "Not Found"}, status_code=404)
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 
