@@ -7,3 +7,6 @@ deepface
 tf-keras
 python-multipart
 websockets
+psycopg2-binary
+sqlalchemy
+python-dotenv
