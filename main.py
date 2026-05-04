@@ -53,18 +53,18 @@ mp_draw = mp.solutions.drawing_utils
 # Canvas for Air Writing
 canvas = None
 
-@app.get("/")
+@app.get("/api")
 async def root():
     return {"message": "MHS AI Backend Running"}
 
-@app.get("/logs")
+@app.get("/api/logs")
 async def get_logs():
     db = SessionLocal()
     logs = db.query(AILog).order_by(AILog.timestamp.desc()).limit(50).all()
     db.close()
     return logs
 
-@app.websocket("/ws/air-writing")
+@app.websocket("/api/ws/air-writing")
 async def air_writing_websocket(websocket: WebSocket):
     await websocket.accept()
     global canvas
@@ -122,7 +122,7 @@ async def air_writing_websocket(websocket: WebSocket):
     except WebSocketDisconnect:
         print("Client disconnected")
 
-@app.websocket("/ws/age-detection")
+@app.websocket("/api/ws/age-detection")
 async def age_detection_websocket(websocket: WebSocket):
     await websocket.accept()
     last_logged_age = None
@@ -141,7 +141,6 @@ async def age_detection_websocket(websocket: WebSocket):
                 if results:
                     age = results[0]['dominant_age']
                     
-                    # Log to DB if age changed or enough time passed
                     if age != last_logged_age:
                         db = SessionLocal()
                         new_log = AILog(feature_type='age', result_value=str(age))
