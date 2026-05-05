@@ -1,4 +1,12 @@
 import os
+import sys
+
+# CRITICAL: Set envs BEFORE importing any AI libs
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['PYTHONUNBUFFERED'] = '1'
+
 import json
 import base64
 import gc
@@ -8,11 +16,9 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
-# SET ENVS BEFORE ANYTHING ELSE
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-
+print(">>> Backend: Initializing FastAPI app...")
 app = FastAPI()
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -144,6 +150,7 @@ async def catch_all(request, exc):
 
 if __name__ == "__main__":
     import uvicorn
+    print(">>> Backend: Starting Uvicorn on port 5000...")
     uvicorn.run(app, host="0.0.0.0", port=5000)
 
 
