@@ -1,16 +1,14 @@
 import os
-import asyncio
-import gc
 import json
 import base64
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, JSONResponse
+import gc
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from pathlib import Path
-from datetime import datetime
 
-# Environment settings for memory
+# SET ENVS BEFORE ANYTHING ELSE
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
@@ -23,38 +21,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global model placeholders (LAZY LOADING)
-hands_model = None
-deepface_ready = False
-
 @app.get("/api")
 async def root():
-    return {"status": "Online", "mode": "Instant-Start Ready"}
+    return {"status": "Online", "engine": "Ultra-Lite Ready"}
 
 @app.get("/api/logs")
 async def get_logs():
-    # Simple mock logs for stability if DB is slow
-    return [{"id": 1, "timestamp": datetime.utcnow().isoformat(), "feature_type": "system", "result_value": "Engine Ready"}]
+    return [{"id": 1, "result_value": "System Ready"}]
 
 @app.websocket("/api/ws/air-writing")
 async def air_writing_websocket(websocket: WebSocket):
-    global hands_model
     await websocket.accept()
     
-    # Load Mediapipe only when needed
-    if hands_model is None:
-        import cv2
-        import numpy as np
-        import mediapipe as mp
-        hands_model = mp.solutions.hands.Hands(
-            static_image_mode=False,
-            max_num_hands=1,
-            min_detection_confidence=0.7,
-            min_tracking_confidence=0.5
-        )
-    else:
-        import cv2
-        import numpy as np
+    # LAZY IMPORTS - ONLY WHEN CLIENT CONNECTS
+    import cv2
+    import numpy as np
+    import mediapipe as mp
+    
+    hands_model = mp.solutions.hands.Hands(
+        static_image_mode=False,
+        max_num_hands=1,
+        min_detection_confidence=0.7,
+        min_tracking_confidence=0.5
+    )
 
     canvas = None
     points = []
@@ -107,7 +96,6 @@ async def air_writing_websocket(websocket: WebSocket):
             
             del frame, rgb_frame, combined
             gc.collect()
-                
     except:
         pass
 
@@ -115,7 +103,6 @@ async def air_writing_websocket(websocket: WebSocket):
 async def age_detection_websocket(websocket: WebSocket):
     await websocket.accept()
     
-    # Imports inside to prevent startup crash
     import cv2
     import numpy as np
     from deepface import DeepFace
@@ -128,12 +115,10 @@ async def age_detection_websocket(websocket: WebSocket):
             frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
             
             try:
-                # Process age
                 results = DeepFace.analyze(frame, actions=['age'], enforce_detection=False)
                 if results:
-                    age = results[0]['dominant_age']
                     await websocket.send_text(json.dumps({
-                        "age": age,
+                        "age": results[0]['dominant_age'],
                         "confidence": 0.9,
                         "new_log": False
                     }))
@@ -145,7 +130,7 @@ async def age_detection_websocket(websocket: WebSocket):
     except:
         pass
 
-# Static serving
+# Static serving logic
 current_dir = Path(__file__).parent
 dist_path = current_dir.parent / "frontend" / "dist"
 if dist_path.exists():
@@ -159,7 +144,6 @@ async def catch_all(request, exc):
 
 if __name__ == "__main__":
     import uvicorn
-    # Use port 5000 as required by Replit
     uvicorn.run(app, host="0.0.0.0", port=5000)
 
 
